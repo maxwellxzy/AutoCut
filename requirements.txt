@@ -1,0 +1,7 @@
+pip install --upgrade pip -i https://pypi.tuna.tsinghua.edu.cn/simple
+pip install torch==2.4.1 torchvision==0.19.1 torchaudio==2.4.1 --index-url https://download.pytorch.org/whl/cu118
+pip install -e . -i https://pypi.tuna.tsinghua.edu.cn/simple
+pip install -e detectron2 -i https://pypi.tuna.tsinghua.edu.cn/simple
+pip install ultralytics -i https://pypi.tuna.tsinghua.edu.cn/simple
+pip install flask -i https://pypi.tuna.tsinghua.edu.cn/simple
+pip install Pillow==9.5.0 -i https://pypi.tuna.tsinghua.edu.cn/simple
