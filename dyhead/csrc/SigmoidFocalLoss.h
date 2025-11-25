@@ -1,5 +1,5 @@
 #pragma once
-
+#include <torch/extension.h>   // <--- 显示包含头文件,from maxwellxzy,11/25/2025
 #ifdef WITH_CUDA
 #include "cuda/vision.h"
 #endif

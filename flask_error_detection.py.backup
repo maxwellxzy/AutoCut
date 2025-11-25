@@ -17,12 +17,8 @@ from dataclasses import dataclass, asdict
 import time
 import random
 import uuid
-from datetime import datetime
-import zipfile
-import re
 
 from flask import Flask, render_template_string, request, jsonify, send_file
-from flask_cors import CORS
 from werkzeug.utils import secure_filename
 
 # 添加当前目录到路径，以便导入其他模块
@@ -40,16 +36,6 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
-
-# 配置 CORS - 允许所有域名访问
-CORS(app, resources={
-    r"/*": {
-        "origins": "*",
-        "methods": ["GET", "POST"],
-        "allow_headers": ["Content-Type"]
-    }
-})
-
 app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16MB max file size
 app.config['UPLOAD_FOLDER'] = 'uploads'
 app.config['OUTPUT_FOLDER'] = 'outputs'
@@ -85,221 +71,6 @@ class MatchResult:
     question_box: Dict
     error_boxes: List[Dict]
     match_method: str
-
-
-class QuestionCropper:
-    """题目裁剪器 - 负责将题目区域裁剪成独立图片"""
-
-    def __init__(self, padding: int = 10):
-        """
-        初始化裁剪器
-        Args:
-            padding: 裁剪时在边界外扩展的像素数
-        """
-        self.padding = padding
-
-    def crop_questions(self, image: np.ndarray, question_boxes: List[DetectionBox],
-                      output_dir: str, prefix: str = "question") -> List[Dict]:
-        """
-        裁剪所有题目并保存
-        Args:
-            image: 原始图像
-            question_boxes: 题目检测框列表
-            output_dir: 输出目录
-            prefix: 文件名前缀
-        Returns:
-            裁剪信息列表
-        """
-        os.makedirs(output_dir, exist_ok=True)
-        cropped_info = []
-
-        for i, box in enumerate(question_boxes, 1):
-            # 应用边界扩展
-            left, top, right, bottom = self._apply_padding(box, image.shape)
-
-            # 裁剪图片
-            cropped = image[top:bottom, left:right]
-
-            # 保存
-            filename = f"{prefix}_{i:03d}.jpg"
-            filepath = os.path.join(output_dir, filename)
-            cv2.imwrite(filepath, cropped)
-
-            # 记录信息
-            cropped_info.append({
-                'filename': filename,
-                'question_id': i,
-                'bbox': [box.left, box.top, box.right, box.bottom],
-                'vertical_id': box.vertical_id
-            })
-
-        logger.info(f"裁剪完成: 共保存 {len(cropped_info)} 个题目到 {output_dir}")
-        return cropped_info
-
-    def crop_error_questions(self, image: np.ndarray, match_results: List[MatchResult],
-                            output_dir: str) -> List[Dict]:
-        """
-        仅裁剪检测到错误的题目
-        Args:
-            image: 原始图像
-            match_results: 错题匹配结果列表
-            output_dir: 输出目录
-        Returns:
-            裁剪信息列表
-        """
-        os.makedirs(output_dir, exist_ok=True)
-        cropped_info = []
-
-        for i, result in enumerate(match_results, 1):
-            # 从字典中重建DetectionBox
-            q_dict = result.question_box
-            bbox = q_dict['bbox']  # [x, y, width, height]
-
-            # 创建临时DetectionBox用于padding计算
-            temp_box = type('obj', (object,), {
-                'left': bbox[0],
-                'top': bbox[1],
-                'right': bbox[0] + bbox[2],
-                'bottom': bbox[1] + bbox[3]
-            })()
-
-            # 应用边界扩展
-            left, top, right, bottom = self._apply_padding(temp_box, image.shape)
-
-            # 裁剪图片
-            cropped = image[top:bottom, left:right]
-
-            # 保存
-            filename = f"error_question_{i:03d}.jpg"
-            filepath = os.path.join(output_dir, filename)
-            cv2.imwrite(filepath, cropped)
-
-            # 记录信息（包含错误框信息）
-            cropped_info.append({
-                'filename': filename,
-                'question_id': i,
-                'bbox': bbox,
-                'error_boxes': result.error_boxes,
-                'match_method': result.match_method
-            })
-
-        logger.info(f"裁剪完成: 共保存 {len(cropped_info)} 个错题到 {output_dir}")
-        return cropped_info
-
-    def _apply_padding(self, box, image_shape: Tuple[int, int, int]) -> Tuple[int, int, int, int]:
-        """
-        应用边界扩展并确保不超出图像边界
-        Args:
-            box: 检测框对象（需要有left, top, right, bottom属性）
-            image_shape: 图像形状 (height, width, channels)
-        Returns:
-            (left, top, right, bottom) 扩展后的坐标
-        """
-        height, width = image_shape[:2]
-
-        left = max(0, box.left - self.padding)
-        top = max(0, box.top - self.padding)
-        right = min(width, box.right + self.padding)
-        bottom = min(height, box.bottom + self.padding)
-
-        return left, top, right, bottom
-
-
-class SessionManager:
-    """会话管理器 - 负责会话ID生成、目录管理和文件清理"""
-
-    @staticmethod
-    def generate_session_id() -> str:
-        """生成唯一的会话ID"""
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        random_str = uuid.uuid4().hex[:8]
-        return f"{timestamp}_{random_str}"
-
-    @staticmethod
-    def create_session_directory(base_dir: str, session_id: str) -> Dict[str, str]:
-        """
-        创建会话目录结构
-        Args:
-            base_dir: 基础输出目录
-            session_id: 会话ID
-        Returns:
-            包含各目录路径的字典
-        """
-        session_dir = os.path.join(base_dir, session_id)
-        questions_dir = os.path.join(session_dir, 'questions')
-
-        os.makedirs(questions_dir, exist_ok=True)
-
-        return {
-            'session_dir': session_dir,
-            'questions_dir': questions_dir
-        }
-
-    @staticmethod
-    def save_metadata(session_dir: str, metadata: Dict) -> None:
-        """
-        保存元数据到JSON文件
-        Args:
-            session_dir: 会话目录
-            metadata: 元数据字典
-        """
-        metadata_path = os.path.join(session_dir, 'metadata.json')
-        with open(metadata_path, 'w', encoding='utf-8') as f:
-            json.dump(metadata, f, ensure_ascii=False, indent=2)
-        logger.info(f"元数据已保存: {metadata_path}")
-
-    @staticmethod
-    def cleanup_old_sessions(base_dir: str, max_age_hours: int = 24) -> int:
-        """
-        清理旧的会话文件
-        Args:
-            base_dir: 基础输出目录
-            max_age_hours: 最大保留时间（小时）
-        Returns:
-            清理的会话数量
-        """
-        if not os.path.exists(base_dir):
-            return 0
-
-        current_time = time.time()
-        max_age_seconds = max_age_hours * 3600
-        cleaned_count = 0
-
-        for session_id in os.listdir(base_dir):
-            session_path = os.path.join(base_dir, session_id)
-
-            if not os.path.isdir(session_path):
-                continue
-
-            # 检查目录创建时间
-            dir_ctime = os.path.getctime(session_path)
-            age_seconds = current_time - dir_ctime
-
-            if age_seconds > max_age_seconds:
-                try:
-                    import shutil
-                    shutil.rmtree(session_path)
-                    cleaned_count += 1
-                    logger.info(f"清理旧会话: {session_id}")
-                except Exception as e:
-                    logger.error(f"清理会话失败 {session_id}: {e}")
-
-        if cleaned_count > 0:
-            logger.info(f"共清理 {cleaned_count} 个旧会话")
-
-        return cleaned_count
-
-    @staticmethod
-    def validate_session_id(session_id: str) -> bool:
-        """
-        验证会话ID格式
-        Args:
-            session_id: 会话ID
-        Returns:
-            是否有效
-        """
-        pattern = r'^\d{8}_\d{6}_[a-f0-9]{8}$'
-        return re.match(pattern, session_id) is not None
 
 
 class ColorGenerator:
@@ -736,59 +507,6 @@ class ErrorQuestionDetector:
         return error_boxes
 
 
-def create_zip_file(session_dir: str) -> str:
-    """
-    创建ZIP文件包含所有裁剪的图片
-    Args:
-        session_dir: 会话目录路径
-    Returns:
-        ZIP文件路径
-    """
-    zip_path = os.path.join(session_dir, "questions.zip")
-    questions_dir = os.path.join(session_dir, 'questions')
-
-    if not os.path.exists(questions_dir):
-        logger.warning(f"题目目录不存在: {questions_dir}")
-        return None
-
-    with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
-        for filename in os.listdir(questions_dir):
-            if filename.lower().endswith(('.jpg', '.jpeg', '.png')):
-                file_path = os.path.join(questions_dir, filename)
-                zipf.write(file_path, filename)
-
-    logger.info(f"ZIP文件已创建: {zip_path}")
-    return zip_path
-
-
-def generate_thumbnail(image: np.ndarray, max_size: int = 150) -> str:
-    """
-    生成缩略图并转换为base64
-    Args:
-        image: 原始图像
-        max_size: 最大边长
-    Returns:
-        base64编码的缩略图字符串
-    """
-    height, width = image.shape[:2]
-
-    # 计算缩放比例
-    if height > width:
-        new_height = max_size
-        new_width = int(width * (max_size / height))
-    else:
-        new_width = max_size
-        new_height = int(height * (max_size / width))
-
-    # 缩放图像
-    thumbnail = cv2.resize(image, (new_width, new_height), interpolation=cv2.INTER_AREA)
-
-    # 转换为base64
-    _, buffer = cv2.imencode('.jpg', thumbnail, [cv2.IMWRITE_JPEG_QUALITY, 85])
-    img_str = base64.b64encode(buffer).decode()
-    return f"data:image/jpeg;base64,{img_str}"
-
-
 # 全局检测器实例
 detector = None
 
@@ -877,107 +595,34 @@ def detect():
             logger.info("检测器未初始化，正在初始化...")
             init_detector()
 
-        # 获取用户选项：是否启用错题检测
-        enable_error_detection = request.form.get('enable_error_detection', 'true').lower() == 'true'
-        logger.info(f"启用错题检测: {enable_error_detection}")
-
         # 执行检测
         logger.info("开始执行检测...")
         match_results, question_boxes, error_boxes = detector.detect_error_questions(image)
 
-        # === 生成会话ID和目录 ===
-        logger.info("创建会话目录...")
-        session_id = SessionManager.generate_session_id()
-        dirs = SessionManager.create_session_directory(app.config['OUTPUT_FOLDER'], session_id)
-        session_dir = dirs['session_dir']
-        questions_dir = dirs['questions_dir']
-
-        logger.info("正在生成并保存可视化图片...")
-        # 生成可视化图片并保存到文件系统
+        logger.info("正在生成可视化图片...")
+        # 生成可视化图片
         # 1. 错误符号检测图
         error_symbols_image = ResultVisualizer.draw_error_boxes(image, error_boxes)
-        error_symbols_path = os.path.join(session_dir, 'error_symbols.jpg')
-        cv2.imwrite(error_symbols_path, error_symbols_image)
-        logger.info(f"已保存错误符号检测图: {error_symbols_path}")
+        error_symbols_b64 = image_to_base64(error_symbols_image)
 
         # 2. 题目分割图
         questions_image = ResultVisualizer.draw_question_boxes(image, question_boxes)
-        questions_path = os.path.join(session_dir, 'questions.jpg')
-        cv2.imwrite(questions_path, questions_image)
-        logger.info(f"已保存题目分割图: {questions_path}")
+        questions_b64 = image_to_base64(questions_image)
 
         # 3. 错题匹配图
         matched_errors_image = ResultVisualizer.draw_match_results(image, match_results)
-        matched_errors_path = os.path.join(session_dir, 'matched_errors.jpg')
-        cv2.imwrite(matched_errors_path, matched_errors_image)
-        logger.info(f"已保存错题匹配图: {matched_errors_path}")
-
-        # === 题目裁剪功能 ===
-        logger.info("开始裁剪题目...")
-
-        # 初始化裁剪器
-        cropper = QuestionCropper(padding=10)
-
-        # 根据用户选项决定裁剪模式
-        if enable_error_detection and len(match_results) > 0:
-            # 模式1: 仅裁剪错题
-            cropped_info = cropper.crop_error_questions(image, match_results, questions_dir)
-            mode = "error_only"
-            logger.info(f"仅裁剪错题模式: 共裁剪 {len(cropped_info)} 个错题")
-        else:
-            # 模式2: 裁剪所有题目（当未启用错题检测，或启用了但没有错题时）
-            cropped_info = cropper.crop_questions(image, question_boxes, questions_dir)
-            mode = "all_questions"
-            if enable_error_detection:
-                logger.info(f"未检测到错题，裁剪所有题目: 共 {len(cropped_info)} 个")
-            else:
-                logger.info(f"裁剪所有题目模式: 共 {len(cropped_info)} 个")
-
-        # 创建ZIP文件
-        logger.info("创建ZIP文件...")
-        zip_path = create_zip_file(session_dir)
-
-        # 保存元数据
-        metadata = {
-            'session_id': session_id,
-            'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            'mode': mode,
-            'enable_error_detection': enable_error_detection,
-            'statistics': {
-                'total_questions': len(question_boxes),
-                'cropped_questions': len(cropped_info),
-                'error_symbols': len(error_boxes),
-                'error_questions': len(match_results)
-            },
-            'cropped_images': cropped_info
-        }
-        SessionManager.save_metadata(session_dir, metadata)
-
-        # 自动清理旧会话（超过24小时）
-        SessionManager.cleanup_old_sessions(app.config['OUTPUT_FOLDER'], max_age_hours=24)
+        matched_errors_b64 = image_to_base64(matched_errors_image)
 
         logger.info("构建响应数据...")
-        # 构建响应数据（使用URL代替base64）
+        # 构建响应数据
         response_data = {
-            'session_id': session_id,
             'error_count': len(match_results),
             'question_count': len(question_boxes),
             'error_symbol_count': len(error_boxes),
-            # 可视化图片URL
-            'visualization_images': {
-                'error_symbols': f'/visualizations/{session_id}/error_symbols.jpg',
-                'questions': f'/visualizations/{session_id}/questions.jpg',
-                'matched_errors': f'/visualizations/{session_id}/matched_errors.jpg'
-            },
-            # 错题详情（纯数据）
-            'error_details': [asdict(result) for result in match_results],
-            # 裁剪结果
-            'crop_results': {
-                'mode': mode,
-                'cropped_count': len(cropped_info),
-                'cropped_images': cropped_info,
-                'zip_url': f'/download/{session_id}' if zip_path else None
-            }
+            'error_symbols_image': error_symbols_b64,
+            'questions_image': questions_b64,
+            'matched_errors_image': matched_errors_b64,
+            'error_details': [asdict(result) for result in match_results]
         }
 
         logger.info(f"检测完成，返回结果: 错题{len(match_results)}个，题目{len(question_boxes)}个，错号{len(error_boxes)}个")
@@ -995,124 +640,6 @@ def detect():
             'success': False,
             'message': f'检测失败: {str(e)}'
         })
-
-
-@app.route('/download/<session_id>', methods=['GET'])
-def download_zip(session_id):
-    """下载ZIP文件接口"""
-    try:
-        # 验证session_id格式
-        if not SessionManager.validate_session_id(session_id):
-            logger.warning(f"无效的session_id格式: {session_id}")
-            return jsonify({'success': False, 'message': '无效的会话ID'}), 400
-
-        # 构建ZIP文件路径
-        zip_path = os.path.join(app.config['OUTPUT_FOLDER'], session_id, 'questions.zip')
-
-        # 检查文件是否存在
-        if not os.path.exists(zip_path):
-            logger.warning(f"ZIP文件不存在: {zip_path}")
-            return jsonify({'success': False, 'message': 'ZIP文件不存在'}), 404
-
-        # 发送文件
-        logger.info(f"发送ZIP文件: {zip_path}")
-        return send_file(
-            zip_path,
-            as_attachment=True,
-            download_name=f'questions_{session_id}.zip',
-            mimetype='application/zip'
-        )
-
-    except Exception as e:
-        logger.error(f"下载ZIP文件失败: {str(e)}")
-        return jsonify({'success': False, 'message': f'下载失败: {str(e)}'}), 500
-
-
-@app.route('/visualizations/<session_id>/<filename>', methods=['GET'])
-def get_visualization(session_id, filename):
-    """访问可视化图片接口"""
-    try:
-        # 验证session_id格式
-        if not SessionManager.validate_session_id(session_id):
-            logger.warning(f"无效的session_id格式: {session_id}")
-            return jsonify({'success': False, 'message': '无效的会话ID'}), 400
-
-        # 使用secure_filename防止路径遍历攻击
-        safe_filename = secure_filename(filename)
-
-        # 只允许访问特定的可视化图片
-        allowed_files = {'error_symbols.jpg', 'questions.jpg', 'matched_errors.jpg'}
-        if safe_filename not in allowed_files:
-            logger.warning(f"尝试访问未授权的文件: {safe_filename}")
-            return jsonify({'success': False, 'message': '文件不存在'}), 404
-
-        # 构建文件路径
-        file_path = os.path.join(
-            app.config['OUTPUT_FOLDER'],
-            session_id,
-            safe_filename
-        )
-
-        # 检查文件是否存在
-        if not os.path.exists(file_path):
-            logger.warning(f"文件不存在: {file_path}")
-            return jsonify({'success': False, 'message': '文件不存在'}), 404
-
-        # 检查文件是否在允许的目录内（防止路径遍历）
-        real_path = os.path.realpath(file_path)
-        base_dir = os.path.realpath(app.config['OUTPUT_FOLDER'])
-        if not real_path.startswith(base_dir):
-            logger.warning(f"非法文件访问尝试: {file_path}")
-            return jsonify({'success': False, 'message': '非法访问'}), 403
-
-        # 发送文件
-        logger.info(f"发送可视化图片: {file_path}")
-        return send_file(file_path, mimetype='image/jpeg')
-
-    except Exception as e:
-        logger.error(f"访问可视化图片失败: {str(e)}")
-        return jsonify({'success': False, 'message': f'访问失败: {str(e)}'}), 500
-
-
-@app.route('/files/<session_id>/<filename>', methods=['GET'])
-def get_file(session_id, filename):
-    """访问裁剪后的题目图片接口"""
-    try:
-        # 验证session_id格式
-        if not SessionManager.validate_session_id(session_id):
-            logger.warning(f"无效的session_id格式: {session_id}")
-            return jsonify({'success': False, 'message': '无效的会话ID'}), 400
-
-        # 使用secure_filename防止路径遍历攻击
-        safe_filename = secure_filename(filename)
-
-        # 构建文件路径
-        file_path = os.path.join(
-            app.config['OUTPUT_FOLDER'],
-            session_id,
-            'questions',
-            safe_filename
-        )
-
-        # 检查文件是否存在
-        if not os.path.exists(file_path):
-            logger.warning(f"文件不存在: {file_path}")
-            return jsonify({'success': False, 'message': '文件不存在'}), 404
-
-        # 检查文件是否在允许的目录内（防止路径遍历）
-        real_path = os.path.realpath(file_path)
-        base_dir = os.path.realpath(app.config['OUTPUT_FOLDER'])
-        if not real_path.startswith(base_dir):
-            logger.warning(f"非法文件访问尝试: {file_path}")
-            return jsonify({'success': False, 'message': '非法访问'}), 403
-
-        # 发送文件
-        logger.info(f"发送题目图片: {file_path}")
-        return send_file(file_path, mimetype='image/jpeg')
-
-    except Exception as e:
-        logger.error(f"访问文件失败: {str(e)}")
-        return jsonify({'success': False, 'message': f'访问失败: {str(e)}'}), 500
 
 
 @app.route('/', methods=['GET'])
@@ -1483,17 +1010,6 @@ def index():
                 <div class="upload-hint">支持 JPG, PNG, JPEG 格式，最大 16MB</div>
             </div>
             <input type="file" id="fileInput" accept="image/*">
-
-            <div class="options-section" style="margin: 20px 0; text-align: center;">
-                <label style="display: inline-flex; align-items: center; font-size: 1.1em; cursor: pointer; padding: 10px 20px; background: #f8f9ff; border-radius: 10px; transition: all 0.3s;">
-                    <input type="checkbox" id="enableErrorDetection" checked style="width: 20px; height: 20px; margin-right: 10px; cursor: pointer;">
-                    <span>🎯 启用错题检测（仅裁剪错题）</span>
-                </label>
-                <div style="color: #666; font-size: 0.9em; margin-top: 10px;">
-                    💡 取消勾选将裁剪所有题目
-                </div>
-            </div>
-
             <button class="btn" id="uploadBtn" onclick="uploadImage()" disabled>🚀 开始检测</button>
         </div>
 
@@ -1511,21 +1027,6 @@ def index():
             <div class="image-grid" id="imageGrid"></div>
 
             <div class="error-list" id="errorList"></div>
-
-            <!-- 新增：裁剪结果展示区域 -->
-            <div class="cropped-results" id="croppedResults" style="display: none; margin-top: 30px; background: #f0f4ff; border-radius: 15px; padding: 20px;">
-                <h3 style="text-align: center; color: #333; margin-bottom: 20px;">📸 题目裁剪结果</h3>
-
-                <div style="text-align: center; margin-bottom: 20px;">
-                    <button class="btn" onclick="downloadZip()" style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);">
-                        📥 下载所有题目 (ZIP)
-                    </button>
-                </div>
-
-                <div id="thumbnailGrid" style="display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 15px; margin-top: 20px;"></div>
-
-                <div id="cropInfo" style="text-align: center; margin-top: 15px; color: #666; font-size: 0.9em;"></div>
-            </div>
         </div>
 
         <!-- 图片放大模态框 -->
@@ -1597,9 +1098,6 @@ def index():
 
             const formData = new FormData();
             formData.append('image', selectedFile);
-            // 添加错题检测选项
-            const enableErrorDetection = document.getElementById('enableErrorDetection').checked;
-            formData.append('enable_error_detection', enableErrorDetection);
 
             try {
                 const response = await fetch('/detect', {
@@ -1648,19 +1146,19 @@ def index():
             `;
             document.getElementById('stats').innerHTML = statsHtml;
 
-            // 显示图片（使用URL代替base64）
+            // 显示图片（添加点击放大功能）
             const imageGridHtml = `
                 <div class="image-card">
                     <h3>🔍 错误符号检测</h3>
-                    <img src="${data.visualization_images.error_symbols}" alt="错误符号检测结果" onclick="openModal(this, '错误符号检测结果')">
+                    <img src="${data.error_symbols_image}" alt="错误符号检测结果" onclick="openModal(this, '错误符号检测结果')">
                 </div>
                 <div class="image-card">
                     <h3>📝 题目分割</h3>
-                    <img src="${data.visualization_images.questions}" alt="题目分割结果" onclick="openModal(this, '题目分割结果')">
+                    <img src="${data.questions_image}" alt="题目分割结果" onclick="openModal(this, '题目分割结果')">
                 </div>
                 <div class="image-card">
                     <h3>❌ 错题匹配</h3>
-                    <img src="${data.visualization_images.matched_errors}" alt="错题匹配结果" onclick="openModal(this, '错题匹配结果')">
+                    <img src="${data.matched_errors_image}" alt="错题匹配结果" onclick="openModal(this, '错题匹配结果')">
                 </div>
             `;
             document.getElementById('imageGrid').innerHTML = imageGridHtml;
@@ -1693,66 +1191,11 @@ def index():
                 document.getElementById('errorList').innerHTML = '<h3>🎉 恭喜！未检测到错题</h3>';
             }
 
-            // 显示裁剪结果
-            if (data.crop_results) {
-                displayCroppedResults(data.crop_results);
-            }
-
             // 显示结果区域，但保持上传区域可见
             document.getElementById('results').style.display = 'block';
 
             // 重置上传区域状态，允许继续上传
             resetUploadArea();
-        }
-
-        // 新增：显示裁剪结果函数
-        let currentSessionId = null;
-
-        function displayCroppedResults(cropResults) {
-            currentSessionId = data.session_id;
-
-            const croppedResultsDiv = document.getElementById('croppedResults');
-            const thumbnailGrid = document.getElementById('thumbnailGrid');
-            const cropInfo = document.getElementById('cropInfo');
-
-            // 生成题目图片网格（使用URL代替base64缩略图）
-            let thumbnailHtml = '';
-            cropResults.cropped_images.forEach((item, index) => {
-                const imageUrl = `/files/${currentSessionId}/${item.filename}`;
-                thumbnailHtml += `
-                    <div style="background: white; border-radius: 10px; padding: 10px; box-shadow: 0 2px 8px rgba(0,0,0,0.1); transition: transform 0.3s;"
-                         onmouseover="this.style.transform='scale(1.05)'"
-                         onmouseout="this.style.transform='scale(1)'">
-                        <img src="${imageUrl}"
-                             alt="${item.filename}"
-                             style="width: 100%; height: auto; border-radius: 8px; cursor: pointer;"
-                             onclick="openModal(this, '题目 ${item.question_id}')">
-                        <div style="text-align: center; margin-top: 8px; color: #666; font-size: 0.85em;">
-                            题目 ${item.question_id}
-                        </div>
-                    </div>
-                `;
-            });
-
-            thumbnailGrid.innerHTML = thumbnailHtml;
-
-            // 显示裁剪信息
-            const modeText = cropResults.mode === 'error_only' ? '仅错题' : '所有题目';
-            cropInfo.innerHTML = `共裁剪 <strong>${cropResults.cropped_count}</strong> 个题目（模式：${modeText}）`;
-
-            // 显示裁剪结果区域
-            croppedResultsDiv.style.display = 'block';
-        }
-
-        // 新增：下载ZIP文件函数
-        function downloadZip() {
-            if (!currentSessionId) {
-                alert('无法下载：未找到会话ID');
-                return;
-            }
-
-            const downloadUrl = `/download/${currentSessionId}`;
-            window.location.href = downloadUrl;
         }
 
         // 图片放大功能

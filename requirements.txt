@@ -4,4 +4,5 @@ pip install -e . -i https://pypi.tuna.tsinghua.edu.cn/simple
 pip install -e detectron2 -i https://pypi.tuna.tsinghua.edu.cn/simple
 pip install ultralytics -i https://pypi.tuna.tsinghua.edu.cn/simple
 pip install flask -i https://pypi.tuna.tsinghua.edu.cn/simple
+pip install flask-cors -i https://pypi.tuna.tsinghua.edu.cn/simple
 pip install Pillow==9.5.0 -i https://pypi.tuna.tsinghua.edu.cn/simple
